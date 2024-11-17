@@ -12,3 +12,4 @@ else
     echo "Build failed."
     exit 1
 fi
+python3 plot_results.py
