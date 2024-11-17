@@ -92,4 +92,8 @@ public:
     // File I/O operations
     void saveToFile(const std::string& filename) const;
     void loadFromFile(const std::string& filename);
+
+    const std::unordered_map<std::string, uint32_t>& getDictionary() const { return dictionary; }
+    const std::vector<std::string>& getReverseDictionary() const { return reverse_dictionary; }
+
 };

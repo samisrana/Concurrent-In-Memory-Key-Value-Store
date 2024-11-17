@@ -47,21 +47,27 @@ void DictionaryCodec::unmapFile() {
     }
 }
 double DictionaryCodec::getCompressionRatio() const {
-    if (original_data.empty() || encoded_data.empty()) {
+    if (encoded_data.empty()) {
         return 0.0;
     }
     
+    // Calculate original size (sum of all string lengths)
     size_t original_size = 0;
-    for (const auto& str : original_data) {
-        original_size += str.length();
+    for (const auto& entry : dictionary) {
+        const std::string& str = entry.first;
+        const uint32_t id = entry.second;
+        original_size += str.length() * std::count(encoded_data.begin(), encoded_data.end(), id);
     }
     
-    size_t encoded_size = encoded_data.size() * sizeof(uint32_t) + 
-                         dictionary.size() * sizeof(uint32_t);
-                         
-    return static_cast<double>(original_size) / encoded_size;
+    // Calculate encoded size (dictionary + encoded data)
+    size_t encoded_size = 0;
+    for (const auto& entry : dictionary) {
+        encoded_size += entry.first.length() + sizeof(uint32_t);  // String + ID in dictionary
+    }
+    encoded_size += encoded_data.size() * sizeof(uint32_t);  // Encoded data array
+    
+    return original_size > 0 ? static_cast<double>(original_size) / encoded_size : 0.0;
 }
-
 size_t DictionaryCodec::getMemoryUsage() const {
     size_t usage = 0;
     for (const auto& [str, _] : dictionary) {
@@ -86,7 +92,6 @@ void DictionaryCodec::encodeFile(const std::string& filename, int num_threads) {
     // Calculate smaller chunk size and buffer sizes
     const size_t CHUNK_SIZE = 10 * 1024 * 1024;  // 10MB chunks (reduced from 100MB)
     const size_t MAX_LINES_PER_CHUNK = CHUNK_SIZE / 16;  // Estimate average line length
-    const size_t num_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
     
     // Pre-allocate a fixed size for the dictionary to prevent reallocation
     dictionary.reserve(1000000);  // Reserve space for 1M unique strings
@@ -225,36 +230,20 @@ std::vector<size_t> DictionaryCodec::baselineFind(const std::string& target) con
 }
 
 std::vector<size_t> DictionaryCodec::findMatches(const std::string& target) const {
+    std::cout << "Starting SIMD search for target: " << target << std::flush;
     std::shared_lock<std::shared_mutex> lock(mutex);
     std::vector<size_t> results;
     
     auto it = dictionary.find(target);
     if (it == dictionary.end()) {
-        return results;
-    }
-    
-    uint32_t target_id = it->second;
-    for (size_t i = 0; i < encoded_data.size(); i++) {
-        if (encoded_data[i] == target_id) {
-            results.push_back(i);
-        }
-    }
-    
-    return results;
-}
-
-std::vector<size_t> DictionaryCodec::findMatchesSIMD(const std::string& target) const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
-    std::vector<size_t> results;
-    
-    auto it = dictionary.find(target);
-    if (it == dictionary.end()) {
+        std::cout << " (not found in dictionary)\n" << std::flush;
         return results;
     }
     
     uint32_t target_id = it->second;
     __m256i target_vec = _mm256_set1_epi32(target_id);
     
+    size_t processed = 0;
     for (size_t i = 0; i < encoded_data.size(); i += 8) {
         __m256i data_vec = _mm256_loadu_si256((__m256i*)&encoded_data[i]);
         __m256i cmp = _mm256_cmpeq_epi32(data_vec, target_vec);
@@ -267,14 +256,63 @@ std::vector<size_t> DictionaryCodec::findMatchesSIMD(const std::string& target) 
             }
             mask &= mask - 1;
         }
+        
+        processed += 8;
+        if (processed % (1000000) == 0) { // Print progress every million entries
+            std::cout << "." << std::flush;
+        }
     }
     
+    std::cout << " found " << results.size() << " matches\n" << std::flush;
     return results;
 }
 
-std::vector<std::pair<std::string, std::vector<size_t>>> DictionaryCodec::prefixSearch(
-    const std::string& prefix) const {
-    return prefixSearchSIMD(prefix);  // Default to SIMD implementation
+std::vector<size_t> DictionaryCodec::findMatchesSIMD(const std::string& target) const {
+    std::shared_lock<std::shared_mutex> lock(mutex);
+    std::vector<size_t> results;
+    results.reserve(1000);  // Pre-allocate space
+    
+    auto it = dictionary.find(target);
+    if (it == dictionary.end()) {
+        return results;
+    }
+    
+    uint32_t target_id = it->second;
+    __m256i target_vec = _mm256_set1_epi32(target_id);
+    
+    // Process in larger chunks (32 integers at a time)
+    const size_t CHUNK_SIZE = 32;
+    const size_t num_chunks = encoded_data.size() / CHUNK_SIZE;
+    
+    for (size_t chunk = 0; chunk < num_chunks; chunk++) {
+        const size_t base_idx = chunk * CHUNK_SIZE;
+        
+        // Process 4 sets of 8 integers each
+        for (size_t i = 0; i < 4; i++) {
+            __m256i data_vec = _mm256_loadu_si256(
+                (__m256i*)&encoded_data[base_idx + i * 8]);
+            __m256i cmp = _mm256_cmpeq_epi32(data_vec, target_vec);
+            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp));
+            
+            while (mask) {
+                int idx = _tzcnt_u32(mask);
+                size_t actual_idx = base_idx + i * 8 + idx;
+                if (actual_idx < encoded_data.size()) {
+                    results.push_back(actual_idx);
+                }
+                mask &= mask - 1;
+            }
+        }
+    }
+    
+    // Handle remaining elements
+    for (size_t i = num_chunks * CHUNK_SIZE; i < encoded_data.size(); i++) {
+        if (encoded_data[i] == target_id) {
+            results.push_back(i);
+        }
+    }
+    
+    return results;
 }
 
 std::vector<std::pair<std::string, std::vector<size_t>>> DictionaryCodec::prefixSearchSIMD(
@@ -286,63 +324,50 @@ std::vector<std::pair<std::string, std::vector<size_t>>> DictionaryCodec::prefix
         return results;
     }
     
-    // Pre-allocate space for results to avoid reallocation
-    results.reserve(100);  // Reasonable initial size
-    
-    // First pass: collect matching strings from dictionary
-    std::vector<std::pair<std::string, uint32_t>> matching_entries;
-    matching_entries.reserve(100);
+    // First find all matching dictionary entries
+    std::vector<std::pair<std::string, uint32_t>> matches;
+    matches.reserve(100);
     
     for (const auto& [str, id] : dictionary) {
         if (str.length() >= prefix.length() && 
             str.compare(0, prefix.length(), prefix) == 0) {
-            matching_entries.emplace_back(str, id);
+            matches.emplace_back(str, id);
         }
     }
     
-    // Process each matching entry
-    for (const auto& [str, id] : matching_entries) {
-        std::vector<size_t> positions;
-        positions.reserve(100);  // Reserve reasonable space
+    // Now search for all matching IDs in one pass
+    if (!matches.empty()) {
+        results.reserve(matches.size());
+        std::vector<uint32_t> ids;
+        ids.reserve(matches.size());
+        for (const auto& [str, id] : matches) {
+            ids.push_back(id);
+        }
         
-        // Process encoded data in SIMD chunks
-        const size_t SIMD_WIDTH = 8;  // AVX2 processes 8 integers at once
-        const size_t aligned_size = encoded_data.size() & ~(SIMD_WIDTH - 1);
+        // Create a map to collect results for each ID
+        std::unordered_map<uint32_t, std::vector<size_t>> id_results;
+        for (const auto& id : ids) {
+            id_results[id].reserve(100);
+        }
         
-        __m256i target_vec = _mm256_set1_epi32(id);
-        
-        // Process aligned data
-        for (size_t i = 0; i < aligned_size; i += SIMD_WIDTH) {
-            if (i + SIMD_WIDTH <= encoded_data.size()) {  // Bounds check
-                __m256i data_vec = _mm256_loadu_si256(
-                    reinterpret_cast<const __m256i*>(&encoded_data[i]));
-                __m256i cmp = _mm256_cmpeq_epi32(data_vec, target_vec);
-                int mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp));
-                
-                while (mask) {
-                    int idx = _tzcnt_u32(mask);
-                    if (i + idx < encoded_data.size()) {  // Additional bounds check
-                        positions.push_back(i + idx);
-                    }
-                    mask &= mask - 1;
-                }
+        // Scan encoded data once for all IDs
+        for (size_t i = 0; i < encoded_data.size(); i++) {
+            uint32_t current_id = encoded_data[i];
+            auto it = std::find(ids.begin(), ids.end(), current_id);
+            if (it != ids.end()) {
+                id_results[current_id].push_back(i);
             }
         }
         
-        // Process remaining elements
-        for (size_t i = aligned_size; i < encoded_data.size(); i++) {
-            if (encoded_data[i] == id) {
-                positions.push_back(i);
-            }
-        }
-        
-        if (!positions.empty()) {
-            results.emplace_back(str, std::move(positions));
+        // Build final results
+        for (const auto& [str, id] : matches) {
+            results.emplace_back(str, std::move(id_results[id]));
         }
     }
     
     return results;
 }
+
 
 std::vector<std::pair<std::string, std::vector<size_t>>> DictionaryCodec::baselinePrefixSearch(
     const std::string& prefix) const {
@@ -392,6 +417,7 @@ std::vector<std::pair<std::string, std::vector<size_t>>> DictionaryCodec::baseli
     return results;
 }
 
+
 QueryMetrics DictionaryCodec::benchmarkSearch(
     const std::vector<std::string>& queries, bool use_simd) const {
     QueryMetrics metrics;
@@ -401,7 +427,8 @@ QueryMetrics DictionaryCodec::benchmarkSearch(
     
     auto start_time = std::chrono::high_resolution_clock::now();
     
-    for (const auto& query : queries) {
+    for (size_t i = 0; i < queries.size(); i++) {
+        const auto& query = queries[i];
         auto query_start = std::chrono::high_resolution_clock::now();
         
         std::vector<size_t> results;
@@ -417,7 +444,14 @@ QueryMetrics DictionaryCodec::benchmarkSearch(
         
         latencies.push_back(duration);
         metrics.total_matches += results.size();
+
+        // Print progress every 10% or every 100 queries, whichever is less frequent
+        if (i % std::max(queries.size() / 10, size_t(100)) == 0) {
+            std::cout << "\rProgress: " << (i * 100.0 / queries.size()) 
+                      << "% complete" << std::flush;
+        }
     }
+    std::cout << "\rProgress: 100% complete" << std::endl;
     
     auto end_time = std::chrono::high_resolution_clock::now();
     auto total_duration = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -441,6 +475,7 @@ QueryMetrics DictionaryCodec::benchmarkPrefixSearch(
     metrics.clear();
     
     if (prefixes.empty()) {
+        std::cerr << "Warning: Empty prefixes vector provided to benchmarkPrefixSearch" << std::endl;
         return metrics;
     }
     
@@ -448,12 +483,13 @@ QueryMetrics DictionaryCodec::benchmarkPrefixSearch(
     latencies.reserve(prefixes.size());
     
     auto start_time = std::chrono::high_resolution_clock::now();
+    size_t total_matches = 0;
     
     for (const auto& prefix : prefixes) {
         auto query_start = std::chrono::high_resolution_clock::now();
         
+        std::vector<std::pair<std::string, std::vector<size_t>>> results;
         try {
-            std::vector<std::pair<std::string, std::vector<size_t>>> results;
             if (use_simd) {
                 results = prefixSearchSIMD(prefix);
             } else {
@@ -465,8 +501,10 @@ QueryMetrics DictionaryCodec::benchmarkPrefixSearch(
                 query_end - query_start).count();
             
             latencies.push_back(duration);
+            
+            // Count matches
             for (const auto& [_, positions] : results) {
-                metrics.total_matches += positions.size();
+                total_matches += positions.size();
             }
         } catch (const std::exception& e) {
             std::cerr << "Error processing prefix '" << prefix << "': " << e.what() << std::endl;
@@ -475,6 +513,7 @@ QueryMetrics DictionaryCodec::benchmarkPrefixSearch(
     }
     
     if (latencies.empty()) {
+        std::cerr << "Warning: No successful queries in benchmarkPrefixSearch" << std::endl;
         return metrics;
     }
     
@@ -482,7 +521,9 @@ QueryMetrics DictionaryCodec::benchmarkPrefixSearch(
     auto total_duration = std::chrono::duration_cast<std::chrono::microseconds>(
         end_time - start_time).count();
     
+    // Calculate metrics
     metrics.total_queries = prefixes.size();
+    metrics.total_matches = total_matches;
     metrics.avg_latency_us = std::accumulate(latencies.begin(), latencies.end(), 0.0) / latencies.size();
     
     std::sort(latencies.begin(), latencies.end());
@@ -490,6 +531,13 @@ QueryMetrics DictionaryCodec::benchmarkPrefixSearch(
     metrics.p99_latency_us = latencies[size_t(latencies.size() * 0.99)];
     
     metrics.throughput_qps = prefixes.size() / (total_duration / 1000000.0);
+    
+    // Log summary
+    std::cout << (use_simd ? "SIMD" : "Baseline") << " Prefix Search Stats:\n"
+              << "  Queries: " << metrics.total_queries << "\n"
+              << "  Matches: " << metrics.total_matches << "\n"
+              << "  Avg Latency: " << metrics.avg_latency_us << "μs\n"
+              << "  Throughput: " << metrics.throughput_qps << " QPS\n";
     
     return metrics;
 }
