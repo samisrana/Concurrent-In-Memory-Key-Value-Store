@@ -109,6 +109,11 @@ void encodeSingleThread(const std::vector<std::string>& chunk, size_t start_idx)
     }
 }
 ```
+### Test Configuration
+The test suite's behavior can be modified through the `NUM_QUERIES` constant in `main.cpp`:
+- `NUM_QUERIES = 10`: Fast testing (~10 minutes), basic functionality verification
+- `NUM_QUERIES = 50`: Balanced testing (~30 minutes), moderately reliable results
+- `NUM_QUERIES = 100`: Thorough testing (~75 minutes), more statistically significant results
 
 ## Usage
 
