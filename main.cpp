@@ -183,7 +183,7 @@ int main(int argc, char* argv[]) {
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> dis(0, reverse_dict.size() - 1);
         
-        const int NUM_QUERIES = 10;
+        const int NUM_QUERIES = 100; // Adjust for choosing between testing time and accurarcy. More Accuracy = More time. 
         for (int i = 0; i < NUM_QUERIES; i++) {
             test_queries.push_back(reverse_dict[dis(gen)]);
         }
