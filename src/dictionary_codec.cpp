@@ -8,8 +8,8 @@
 #include <cstring>
 #include <zstd.h>
 #include <mutex>
-#include <iostream>   // Added for std::cout
-#include <iomanip>    // Added for std::setprecision
+#include <iostream>  
+#include <iomanip>   
 
 DictionaryCodec::DictionaryCodec() : mmap_fd(-1), mmap_data(nullptr), mmap_size(0) {}
 
