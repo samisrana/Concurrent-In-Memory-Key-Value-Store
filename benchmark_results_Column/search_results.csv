@@ -1,0 +1,4 @@
+Method,MinLatency_us,MaxLatency_us,AvgLatency_us,MedianLatency_us,P95Latency_us,Throughput_QPS,TotalMatches
+Vanilla,45000,60000,50000,49000,58000,20.0,1401
+Dictionary,35732,45102,38987.7,37732,45102,25.6491,1401
+SIMD,27043,32968,30820.8,31626.5,32968,32.4456,1401
