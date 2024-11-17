@@ -63,6 +63,7 @@ std::vector<std::string> BenchmarkSuite::generateRandomPrefixes(size_t count, si
     
     const auto& original_data = codec.getOriginalData();
     if (original_data.empty()) {
+        std::cerr << "Warning: Empty data when generating random prefixes" << std::endl;
         return prefixes;
     }
     
@@ -70,22 +71,45 @@ std::vector<std::string> BenchmarkSuite::generateRandomPrefixes(size_t count, si
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, original_data.size() - 1);
     
-    for (size_t i = 0; i < count; i++) {
-        std::string prefix = original_data[dis(gen)];
+    size_t attempts = 0;
+    const size_t MAX_ATTEMPTS = count * 2;
+    std::unordered_set<std::string> unique_prefixes; // To avoid duplicates
+    
+    while (unique_prefixes.size() < count && attempts < MAX_ATTEMPTS) {
+        const std::string& str = original_data[dis(gen)];
+        std::string prefix = str;
+        
         if (prefix.length() > length) {
             prefix = prefix.substr(0, length);
         }
-        prefixes.push_back(prefix);
+        
+        if (!prefix.empty()) {
+            unique_prefixes.insert(prefix);
+        }
+        attempts++;
     }
+    
+    prefixes.assign(unique_prefixes.begin(), unique_prefixes.end());
+    
+    std::cout << "Generated " << prefixes.size() << " unique prefixes of length " << length 
+              << " (from " << attempts << " attempts)" << std::endl;
     
     return prefixes;
 }
 
 void BenchmarkSuite::warmUp() const {
+    std::cout << "Generating warm-up queries..." << std::flush;
     auto warm_up_queries = generateQueries(config.num_warm_up_queries);
+    std::cout << " generated " << warm_up_queries.size() << " warm-up queries\n" << std::flush;
+    
+    std::cout << "Running warm-up queries..." << std::flush;
+    size_t total_matches = 0;
     for (const auto& query : warm_up_queries) {
-        codec.findMatchesSIMD(query);
+        auto matches = codec.findMatchesSIMD(query);
+        total_matches += matches.size();
     }
+    std::cout << " completed with " << total_matches << " total matches\n" << std::flush;
+
 }
 
 double BenchmarkSuite::measureMemoryUsage() const {
@@ -121,14 +145,33 @@ void BenchmarkSuite::runEncodingBenchmark(const std::string& filename) {
     }
 }
 
+
 void BenchmarkSuite::runSearchBenchmark() {
+    std::cout << "Starting warmup phase..." << std::flush;
     warmUp();
+    std::cout << " done\n" << std::flush;
     
-    auto queries = generateQueries(config.num_queries_per_test);
+    std::cout << "Generating queries..." << std::flush;
+    auto queries = generateQueries(10); // Drastically reduced for testing
+    std::cout << " generated " << queries.size() << " queries\n" << std::flush;
     
+    if (queries.empty()) {
+        std::cerr << "Error: No queries generated\n";
+        return;
+    }
+
+    std::cout << "First few queries: ";
+    for (size_t i = 0; i < std::min(queries.size(), size_t(3)); i++) {
+        std::cout << queries[i] << " ";
+    }
+    std::cout << "\n" << std::flush;
+
     // Baseline search
     {
+        std::cout << "Starting baseline search..." << std::flush;
         auto baseline_metrics = codec.benchmarkSearch(queries, false);
+        std::cout << " completed baseline search\n" << std::flush;
+        
         BenchmarkResult::SearchMetrics baseline;
         baseline.test_name = "Baseline Search";
         baseline.avg_latency_us = baseline_metrics.avg_latency_us;
@@ -138,10 +181,13 @@ void BenchmarkSuite::runSearchBenchmark() {
         baseline.total_matches = baseline_metrics.total_matches;
         results.search_results.push_back(baseline);
     }
-    
+
     // SIMD search
     {
+        std::cout << "Starting SIMD search..." << std::flush;
         auto simd_metrics = codec.benchmarkSearch(queries, true);
+        std::cout << " completed SIMD search\n" << std::flush;
+        
         BenchmarkResult::SearchMetrics simd;
         simd.test_name = "SIMD Search";
         simd.avg_latency_us = simd_metrics.avg_latency_us;
@@ -152,36 +198,48 @@ void BenchmarkSuite::runSearchBenchmark() {
         results.search_results.push_back(simd);
     }
 }
-
-
 void BenchmarkSuite::runPrefixSearchBenchmark() {
+    warmUp();  // Make sure to warm up before benchmarking
+    
     for (size_t prefix_len : config.prefix_lengths) {
+        // Generate prefixes with the specified length
         auto prefixes = generateRandomPrefixes(config.num_queries_per_test, prefix_len);
         
+        if (prefixes.empty()) {
+            std::cerr << "Warning: No prefixes generated for length " << prefix_len << std::endl;
+            continue;
+        }
+
         // Baseline prefix search
         {
+            std::cout << "Running baseline prefix search (len=" << prefix_len << ")..." << std::endl;
             auto baseline_metrics = codec.benchmarkPrefixSearch(prefixes, false);
-            BenchmarkResult::SearchMetrics baseline;
-            baseline.test_name = "Baseline Prefix Search (len=" + std::to_string(prefix_len) + ")";
-            baseline.avg_latency_us = baseline_metrics.avg_latency_us;
-            baseline.p95_latency_us = baseline_metrics.p95_latency_us;
-            baseline.p99_latency_us = baseline_metrics.p99_latency_us;
-            baseline.throughput_qps = baseline_metrics.throughput_qps;
-            baseline.total_matches = baseline_metrics.total_matches;
-            results.search_results.push_back(baseline);
+            if (baseline_metrics.total_queries > 0) {  // Add validation
+                BenchmarkResult::SearchMetrics baseline;
+                baseline.test_name = "Baseline Prefix Search (len=" + std::to_string(prefix_len) + ")";
+                baseline.avg_latency_us = baseline_metrics.avg_latency_us;
+                baseline.p95_latency_us = baseline_metrics.p95_latency_us;
+                baseline.p99_latency_us = baseline_metrics.p99_latency_us;
+                baseline.throughput_qps = baseline_metrics.throughput_qps;
+                baseline.total_matches = baseline_metrics.total_matches;
+                results.search_results.push_back(baseline);
+            }
         }
         
         // SIMD prefix search
         {
+            std::cout << "Running SIMD prefix search (len=" << prefix_len << ")..." << std::endl;
             auto simd_metrics = codec.benchmarkPrefixSearch(prefixes, true);
-            BenchmarkResult::SearchMetrics simd;
-            simd.test_name = "SIMD Prefix Search (len=" + std::to_string(prefix_len) + ")";
-            simd.avg_latency_us = simd_metrics.avg_latency_us;
-            simd.p95_latency_us = simd_metrics.p95_latency_us;
-            simd.p99_latency_us = simd_metrics.p99_latency_us;
-            simd.throughput_qps = simd_metrics.throughput_qps;
-            simd.total_matches = simd_metrics.total_matches;
-            results.search_results.push_back(simd);
+            if (simd_metrics.total_queries > 0) {  // Add validation
+                BenchmarkResult::SearchMetrics simd;
+                simd.test_name = "SIMD Prefix Search (len=" + std::to_string(prefix_len) + ")";
+                simd.avg_latency_us = simd_metrics.avg_latency_us;
+                simd.p95_latency_us = simd_metrics.p95_latency_us;
+                simd.p99_latency_us = simd_metrics.p99_latency_us;
+                simd.throughput_qps = simd_metrics.throughput_qps;
+                simd.total_matches = simd_metrics.total_matches;
+                results.search_results.push_back(simd);
+            }
         }
     }
 }

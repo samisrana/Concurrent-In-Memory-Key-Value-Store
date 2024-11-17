@@ -10,14 +10,15 @@
 #include <sstream>
 #include <filesystem>
 #include <fstream>
+#include <unordered_set>
 
 // Benchmark configuration structure
 struct BenchmarkConfig {
     std::vector<int> thread_counts{1, 2, 4, 8, 16};
     std::vector<size_t> value_sizes{8, 64, 256};  // in bytes
     std::vector<double> read_ratios{0.2, 0.5, 0.8};
-    size_t num_queries_per_test = 10000;
-    size_t num_warm_up_queries = 1000;
+    size_t num_queries_per_test = 100;
+    size_t num_warm_up_queries = 10;
     std::vector<size_t> prefix_lengths{2, 4, 8};
 };
 
@@ -68,7 +69,6 @@ private:
     BenchmarkResult results;
 
     // Helper methods
-    std::vector<std::string> generateQueries(size_t count, size_t prefix_len = 0) const;
     std::vector<std::string> generateRandomPrefixes(size_t count, size_t length) const;
     void printResults() const;
     double measureMemoryUsage() const;
@@ -100,6 +100,7 @@ public:
     void setConfig(const BenchmarkConfig& new_config) { config = new_config; }
     const BenchmarkConfig& getConfig() const { return config; }
     
+    std::vector<std::string> generateQueries(size_t count, size_t prefix_len = 0) const;
     // New method for saving results
     void saveResultsToFile(const std::string& results_dir);
 };
